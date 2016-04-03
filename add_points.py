@@ -2,7 +2,8 @@ import pythoncom
 import win32com.client
 import csv
 import subprocess
-import numpy as np
+import pdb
+import time
 
 
 class PointAdder(object):
@@ -28,37 +29,56 @@ class PointAdder(object):
         self.dat_file_folder = 'C:\\Users\\Johns Lenovo\\Documents\\GitHub\\Streamlines'
         self.dat_file = 'group_01_1.dat'
 
-    def test(self):
-        sline_hbody = self.part.HybridBodies.Add()
-        sline_hbody_ref = self.part.CreateReferenceFromObject(sline_hbody)
-        self.part.HybridShapeFactory.ChangeFeatureName(sline_hbody_ref, "Streamlines")
-        seed_pt = self.part.HybridBodies.Item('Geometrical Set.1').HybridShapes.Item('Point.1')
-        sline = self.Streamline(self, seed_pt)
-        sline.open_dat_file('Point.2_1.dat')
-        sline.create_lines()
-        sline.create_join()
-        cc = sline.create_ccurve()
-        sline_hbody.AppendHybridShape(cc)
-        self.delete_with_selection(sline.pre_hbody)
+    def draw_strlns(self, dat_file=None, max_time=None):
+        strln_hbody = self.create_hbody('Streamlines')
+        if not dat_file:
+            for strln_pt in self.strln_list:
+                strln = self.Streamline(self, seed_pt_obj=strln_pt.ref, max_time=max_time)
+                strln.open_dat_file()
+                self.__draw_strln__(strln, strln_hbody)
+        else:
+            strln = self.Streamline(self, max_time=max_time)
+            strln.open_dat_file(dat_file)
+            self.__draw_strln__(strln, strln_hbody)
+
+    def __draw_strln__(self, strln, hbody):
+        strln.create_lines()
+        strln.create_join()
+        cc = strln.create_ccurve()
+        hbody.AppendHybridShape(cc)
+        self.delete_with_selection(strln.pre_hbody)
 
     def delete_with_selection(self, obj):
         self.sel.Clear()
         self.sel.Add(obj)
         self.sel.Delete()
 
+    def get_strlns_from_selection(self):
+        self.start_time = time.time()
+        self.point_list_from_selection()
+        self.time1 = time.time()
+        self.create_dat_file()
+        self.time2 = time.time()
+        self.run_script()
+        self.time3 = time.time()
+        self.draw_strlns(max_time=0.01)
+        self.finish_time = time.time()
+
     def point_list_from_selection(self):
-        self.sline_list = []
+        self.strln_list = []
         for i in range(self.sel.Count):
             if self.sel.Item(i+1).Type == 'HybridShapePointCoord':
-                hspoint = self.Point(self.sel.Item(i+1))
-                self.sline_list.append(hspoint)
+                hspoint = self.Point(self, self.sel.Item(i+1), direc=1)
+                hspoint2 = self.Point(self, self.sel.Item(i+1), direc=2)
+                self.strln_list.append(hspoint)
+                self.strln_list.append(hspoint2)
 
     def create_dat_file(self):
         header = ['group_name', 'x_location', 'y_location', 'z_location', 'direction(1-forward,2-backward)']
         with open('pvstream_seed.dat', 'w', newline='') as f:
             dat_writer = csv.writer(f, delimiter=' ')
             dat_writer.writerow(header)
-            for pt in self.sline_list:
+            for pt in self.strln_list:
                 dat_writer.writerow(pt.row)
 
     def run_script(self):
@@ -70,39 +90,68 @@ class PointAdder(object):
         arg_string = pvpy + ' ' + pvscript + ' ' + xmf + ' ' + pv_seed + geom_info
         subprocess.call(arg_string, shell=True)
 
+    def __check_for_hbody__(self, hbody_name):
+        try:
+            hbody = self.part.HybridBodies.Item(hbody_name)
+        except pythoncom.com_error:
+            return None
+        else:
+            return hbody
+
+    def create_hbody(self, hbody_name, duplicate=False):
+        hbody_ref = self.__check_for_hbody__(hbody_name)
+        if not hbody_ref:
+            hbody = self.part.HybridBodies.Add()
+            # hbody_ref = self.part.CreateReferenceFromObject(hbody)
+            hbody.Name = hbody_name
+        return hbody
+
     class Point(object):
 
-        def __init__(self, hspoint):
+        def __init__(self, parent, hspoint, direc=1):
             self.name = hspoint.Value.Name
             self.x = hspoint.Value.X.Value
             self.y = hspoint.Value.Y.Value
             self.z = hspoint.Value.Z.Value
             self.xyz = (self.x, self.y, self.z)
-            self.row = [self.name, self.x/1000, self.y/1000, self.z/1000, 1]
+            self.direc = direc
+            self.row = [self.name, self.x/1000, self.y/1000, self.z/1000, self.direc]
+            self.hbody = hspoint.Value.Parent.Parent.Name
+            self.ref = parent.part.HybridBodies.Item(self.hbody).HybridShapes.Item(self.name)
 
     class Streamline(object):
 
-        def __init__(self, parent, seed_pt_obj):
+        def __init__(self, parent, seed_pt_obj=None, max_time=None):
             self.part = parent.part
             self.hyfac = parent.hyfac
-            self.seed_pt_obj = seed_pt_obj
-            self.seed_name = seed_pt_obj.Name
+
             self.pre_hbody = self.part.HybridBodies.Add()
             self.ref_pt_list = []
             self.ref_line_list = []
             self.join_ref = None
+            if not max_time:
+                max_time = 999
+            self.max_time = max_time
+            self.seed_pt_obj = seed_pt_obj
+            if seed_pt_obj:
+                self.seed_name = seed_pt_obj.Name
 
-        def open_dat_file(self, dat_file):
-            with open(dat_file, 'r') as f:
+        def open_dat_file(self, dat_file=None):
+            if not dat_file:
+                dat_file = self.seed_name + '_1.dat'
+            self.dat_file = dat_file
+            with open(self.dat_file, 'r') as f:
                 dat_reader = csv.reader(f, delimiter=' ')
                 for row in dat_reader:
+                    if float(row[0]) > self.max_time:
+                        break
                     self.add_point(row[0], row[1:])
             self.part.update()
 
         def add_point(self, name, coord_tuple):
             sc_tup = tuple(float(x)*1000 for x in coord_tuple)
             point = self.hyfac.AddNewPointCoord(sc_tup[0], sc_tup[1], sc_tup[2])
-            point.Name = name
+            point.Name = "{0:.5f}".format(float(name))
             self.pre_hbody.AppendHybridShape(point)
             self.ref_pt_list.append(self.part.CreateReferenceFromObject(point))
 
@@ -133,59 +182,46 @@ class PointAdder(object):
             self.part.update()
 
         def create_ccurve(self):
+            created = False
             cc = self.hyfac.AddNewCurveSmooth(self.join_ref)
             base_dev = 0.1
-            for i in range(30):
-                try:
-                    dev = base_dev * (i+1)
-                    self.set_ccurve(dev)
-                    # cc.SetTangencyThreshold(0.5)
-                    # cc.CurvatureThresholdActivity = False
-                    # cc.MaximumDeviationActivity = True
-                    # cc.SetMaximumDeviation(0.1)
-                    # cc.TopologySimplificationActivity = True
-                    # cc.CorrectionMode = 3
-                    self.pre_hbody.AppendHybridShape(cc)
-                    self.part.update()
-                except pythoncom:
-                    print('Fail on ' + str(dev) + 'mm')
-                    pass
-                else:
-                    print('Curve accuracy is:' + str(dev))
-                    break
+            dev = base_dev
+            try:
+                self.set_ccurve(cc, dev)
+                self.pre_hbody.AppendHybridShape(cc)
+                self.part.update()
+            except pythoncom.com_error:
+                for i in range(50):
+                    try:
+                        print('Fail on ' + str(dev) + 'mm')
+                        dev += base_dev
+                        cc.SetMaximumDeviation(dev)
+                        self.part.update()
+                    except pythoncom.com_error:
+                        pass
+                    else:
+                        created = True
+                        break
+            else:
+                created = True
+            if not created:
+                return None
+            print(str(self.seed_name) + ': Curve accuracy is:' + str(dev))
             ref2 = self.part.CreateReferenceFromObject(cc)
             cc2 = self.hyfac.AddNewCurveDatum(ref2)
+            if not self.seed_name:
+                self.seed_name = self.dat_file[:-6]
             cc2.Name = 'Streamline_' + str(self.seed_name)
             self.hyfac.DeleteObjectForDatum(ref2)
             return cc2
 
-        def set_ccurve(cc, dev):
+        def set_ccurve(self, cc, dev):
             cc.SetTangencyThreshold(0.5)
             cc.CurvatureThresholdActivity = False
             cc.MaximumDeviationActivity = True
             cc.SetMaximumDeviation(dev)
             cc.TopologySimplificationActivity = True
             cc.CorrectionMode = 3
-
-    def ref_junk_code(self):
-        part = self.catia.ActiveDocument.Part
-        hbody = part.HybridBodies.Add()
-        referencebody = part.CreateReferenceFromObject(hbody)
-        part.HybridShapeFactory.ChangeFeatureName(referencebody, "New Name")
-        point = part.HybridShapeFactory.AddNewPointCoord(10, 20, 30)
-        hbody.AppendHybridShape(point)
-        part.update()
-        nn = part.HybridBodies.Item("New Name")
-        np = nn.HybridShapes.Item("Point.1")
-        np.Name = 'anything'
-        nn.HybridShapes.Item(1).Name = 'licky'
-        part.Parameters.Item("Part1\\New Name\\licky\\X").Value = 100
-        number_of_items = nn.HybridShapes.Count
-        referencebody = self.part.CreateReferenceFromObject(hbody)
-        g_set_name = 'licky'
-        if self.check_for_hbody(g_set_name):
-            g_set_name = str(g_set_name) + "_1"
-        self.hyfac.ChangeFeatureName(referencebody, g_set_name)
 
 
 def set_join_params(join):
